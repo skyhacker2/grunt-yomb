@@ -105,15 +105,15 @@ function isPathProtected(path, protectedPath) {
 	return new RegExp('^' + protectedPath + '(\\/|$)').test(getUnixStylePath(path))
 }
 
-function writeFileSync(toPath, content, encoding, lang) {
+function writeFileSync(toPath, content, encoding, langCode, skipProtectChecking) {
 	var pathProtected = false
 	var i, protectedPath
-	if(globalProtect) {
+	if(globalProtect && !skipProtectChecking) {
 		if(typeof globalProtect == 'string') {
 			protectedPath = path.resolve(buildDir, globalProtect)
 			pathProtected = isPathProtected(toPath, protectedPath)
 		} else if(Array.isArray(globalProtect)) {
-			for(i = 0; i < globalProtect; i++) {
+			for(i = 0; i < globalProtect.length; i++) {
 				protectedPath = path.resolve(buildDir, globalProtect[i])
 				pathProtected = isPathProtected(toPath, protectedPath)
 				if(pathProtected) {
@@ -123,11 +123,11 @@ function writeFileSync(toPath, content, encoding, lang) {
 		}
 	}
 	if(pathProtected) {
-		log('Warning: "' + protectedPath + '" is protected!')
+		log('Warning: can not write file "' + toPath + '" as "' + protectedPath + '" is protected!', 1)
 		return
 	}
-	if(properties && charset) {
-		properties._lang_ = lang || undefined
+	if(properties) {
+		properties._lang_ = langCode || undefined
 		content = replaceProperties(content, properties)
 		properties._lang_ = undefined
 	}
@@ -193,7 +193,7 @@ function getUglified(content, info, opt) {
 function getBodyDeps(def) {
 	var deps = []
 	var got = {}
-	def = def.replace(/(^|[^\.\/\w])require\s*\(\s*(["'])([^"']+?)\2\s*\)/mg, function(full, lead, quote, dep) {
+	def = def.replace(/(^|[^.]+?)\brequire\s*\(\s*(["'])([^"']+?)\2\s*\)/mg, function(full, lead, quote, dep) {
 		var pDep = dep.replace(/\{\{([^{}]+)\}\}/g, "' + $1 + '")
 		got[dep] || deps.push(pDep)
 		got[dep] = 1
@@ -212,14 +212,14 @@ function getBodyDeps(def) {
 function getRelativeDeps(def, exclude) {
 	var deps = []
 	var got = {}
-	var depArr = def.match(/(?:^|[^\.\/\w])define\s*\([^\[\{]*(\[[^\[\]]*\])/m)
+	var depArr = def.match(/(?:^|[^.]+?)\bdefine\s*\([^\[\{]*(\[[^\[\]]*\])/m)
 	depArr = depArr && depArr[1]
 	exclude = exclude || {}
 	depArr && depArr.replace(/(["'])(\.[^"']+?)\1/mg, function(full, quote, dep) {
 		got[dep] || exclude[dep] || globalExclude[dep] || deps.push(dep)
 		got[dep] = 1
 	})
-	def.replace(/(?:^|[^\.\/\w])require\s*\(\s*(["'])(\.[^"']+?)\1\s*\)/mg, function(full, quote, dep) {
+	def.replace(/(?:^|[^.]+?)\brequire\s*\(\s*(["'])(\.[^"']+?)\1\s*\)/mg, function(full, quote, dep) {
 		got[dep] || exclude[dep] || globalExclude[dep] || deps.push(dep)
 		got[dep] = 1
 	})
@@ -239,7 +239,9 @@ function traversalGetRelativeDeps(inputDir, inputId, def, exclude, processed, cu
 		processed[inputId] = 1
 	}
 	while(deps.length) {
-		depId = path.join(path.relative(inputDir, curDir), deps.shift()).split(path.sep).join('/')
+		depId = path.join(path.relative(inputDir, curDir), deps.shift())
+		depId = path.relative(inputDir, path.join(inputDir, depId))
+		depId = depId.split(path.sep).join('/')
 		if(!(/^\./).test(depId)) {
 			depId = './' + depId
 		}
@@ -278,7 +280,7 @@ function getIncProcessed(input, info, callback, opt) {
 	var baseUrl, ugl
 	if(reverseDepMap[input]) {
 		log('Warn: "' + input + '" have circular reference!')
-		return ''
+		callback('')
 	}
 	reverseDepMap[input] = 1
 	if(info.lang) {
@@ -348,7 +350,10 @@ function getIncProcessed(input, info, callback, opt) {
 		}
 		return res
 	}).replace(/<!--\s*require\s+(['"])([^'"]+)\1(?:\s+plain-id:([\w-]+))?\s*-->/mg, function(full, quote, id, plainId) {
-		var file = path.join(inputDir, id).replace(/\.js$/, '') + '.js'
+		var file = path.join(inputDir, id).replace(/\.js$/, '')
+		if(!(/\.tpl\.html?$/).test(id)) {
+			file += '.js'
+		}
 		var asyncMark = '<YOMB_INC_PROCESS_ASYNC_MARK_' + asyncQueue.length + '>'
 		var ug = isNaN(ugl) ? info.uglify : ugl
 		id = getUnixStylePath(id.replace(/\.js$/, ''))
@@ -376,7 +381,7 @@ function getIncProcessed(input, info, callback, opt) {
 		var asyncItem = asyncQueue.shift()
 		if(asyncItem) {
 			asyncItem.processor(function(res) {
-				tmpl = tmpl.replace(new RegExp(asyncItem.mark, 'g'), res)
+				tmpl = tmpl.replace(new RegExp(asyncItem.mark, 'g'), function() {return res})
 				mergeOne()
 			})
 		} else {
@@ -404,7 +409,7 @@ function getIncProcessed(input, info, callback, opt) {
 				tmpl = lang.replaceProperties(tmpl, langResource[info.lang])
 			}
 			if((/\.tpl\.html?$/).test(input)) {
-				strict = (/\b\$data\b/).test(tmpl)
+				strict = (/(^|[^.]+)\B\$data\./).test(tmpl)
 				tmpl = ['<%;(function() {%>', strict ? '' : '<%with($data) {%>', tmpl, strict ? '' : '<%}%>', '<%})();%>'].join(EOL)
 			}
 			callback(tmpl.replace(/\r\n/g, '\n'))
@@ -436,6 +441,7 @@ function compileTmpl(input, type, info, callback, opt) {
 				"	var exports = {};"
 			].join(EOL))
 		}
+		// Tribute to MT by JR!
 		res.push([
 			"	function $encodeHtml(str) {",
 			"		return (str + '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\x60/g, '&#96;').replace(/\x27/g, '&#39;').replace(/\x22/g, '&quot;');",
@@ -493,7 +499,16 @@ function fixDefineParams(def, depId, baseId) {
 	var bodyDeps
 	def = getBodyDeps(def)
 	bodyDeps = def.deps
-	def = def.def.replace(/\b(define\s*\()\s*(?:(["'])([^"'\s]+)\2\s*,\s*)?\s*(\[[^\[\]]*\])?/m, function(full, d, quote, definedId, deps) {
+	if(!(/(^|[^.]+?)\bdefine\s*\(/).test(def.def) && (/(^|[^.]+?)\bmodule\.exports\b/).test(def.def)) {
+		def = [
+			fix('define(', '', 'define(') + 'function(require, exports, module) {',
+				def.def,
+			'});'
+		].join(EOL)
+	} else {
+		def = def.def.replace(/(^|[^.]+?)\b(define\s*\()\s*(?:(["'])([^"'\s]+)\3\s*,\s*)?\s*(\[[^\[\]]*\])?/m, fix)
+	}
+	function fix(full, b, d, quote, definedId, deps) {
 		var id
 		if(bodyDeps.length) {
 			bodyDeps = "'" + bodyDeps.join("', '") + "'"
@@ -512,8 +527,8 @@ function fixDefineParams(def, depId, baseId) {
 				id = './' + id
 			}
 		}
-		return [d, id && ("'" + getUnixStylePath(id) + "', "), deps || "['require', 'exports', 'module'], "].join('')
-	})
+		return [b, d, id && ("'" + getUnixStylePath(id) + "', "), deps || "['require', 'exports', 'module'], "].join('')
+	}
 	return def
 }
 
@@ -557,6 +572,11 @@ function getBuiltAmdModContent(input, info, callback, opt) {
 				fileContent.push(fixDefineParams(fs.readFileSync(fileName, charset), depId, opt.id))
 				mergeOne()
 			}
+		} else if((/\.tpl\.html?$/).test(input)) {
+			compileTmpl(input, 'AMD', info, function(res) {
+				fileContent.push(res)
+				callback(fileContent.join(EOLEOL))
+			}, {id: opt.id, reverseDepMap: opt.reverseDepMap})
 		} else {
 			fileContent.push(fixDefineParams(content, opt.id))
 			callback(fileContent.join(EOLEOL))
@@ -624,7 +644,7 @@ function compileDirCoffee(info, callback, baseName) {
 				outputFile = path.join(outputDir, fileName)
 				compileOneCoffee(utils.extendObject(utils.cloneObject(info), {inputs: [inputFile], output: outputFile}), function() {
 					compiles()
-				}, true)
+				}, true, true)
 			} else if(fs.statSync(inputFile).isDirectory() && !(inputFile == outputDir || path.relative(inputFile, outputDir).indexOf('..') != 0)) {
 				compileDirCoffee({input: inputFile, output: info.output, ignore: ignore}, function() {
 					compiles()
@@ -638,7 +658,7 @@ function compileDirCoffee(info, callback, baseName) {
 	}
 }
 
-function compileOneCoffee(info, callback, allowSrcOutput) {
+function compileOneCoffee(info, callback, allowSrcOutput, skipProtectChecking) {
 	if(!checkCondition(info.condition)) {
 		callback()
 		return
@@ -687,10 +707,10 @@ function compileOneCoffee(info, callback, allowSrcOutput) {
 		dealErr(e)
 	}
 	if(coffeeOptions.sourceMap) {
-		writeFileSync(output, result.js + EOL + '//@ sourceMappingURL=' + outputFilename + '.map', charset)
-		writeFileSync(output + '.map', result.v3SourceMap, charset)
+		writeFileSync(output, result.js + EOL + '//@ sourceMappingURL=' + outputFilename + '.map', charset, null, skipProtectChecking)
+		writeFileSync(output + '.map', result.v3SourceMap, charset, null, skipProtectChecking)
 	} else {
-		writeFileSync(output, result, charset)
+		writeFileSync(output, result, charset, null, skipProtectChecking)
 	}
 	callback()
 }
@@ -722,22 +742,23 @@ function buildOneDir(info, callback, baseName) {
 			inputFile = path.resolve(inputDir, buildList.shift())
 			if(ignore[inputFile] || (/^\.|~$/).test(path.basename(inputFile))) {
 				build()
-			} else if(path.basename(inputFile) == 'main.js' || (/-main\.js$/).test(inputFile) || path.basename(inputFile) == path.basename(inputDir) + '.js') {
+			} else if((/(^|[-_.])main\.js$/).test(path.basename(inputFile))) {
 				fileName = path.basename(inputFile)
 				outputFile = path.join(outputDir, fileName)
 				if(inputFile == outputFile) {
-					outputFile = outputFile.replace(/\.js$/, '-built.js')
+					tmp = inputFile.match(/([-_.])main\.js$/)
+					outputFile = outputFile.replace(/\.js$/, (tmp && tmp[1] || '-') + 'built.js')
 				}
 				buildOne(utils.extendObject(utils.cloneObject(info), {input: inputFile, output: outputFile}), function() {
 					build()
 				}, true)
-			} else if(path.basename(inputFile) == 'main.less' || (/-main\.less$/).test(inputFile) || path.basename(inputFile) == path.basename(inputDir) + '.less') {
+			} else if((/(^|[-_.])main\.less$/).test(path.basename(inputFile))) {
 				fileName = path.basename(inputFile).replace(/\.less$/, '.css')
 				outputFile = path.join(outputDir, fileName)
 				buildOne(utils.extendObject(utils.cloneObject(info), {input: inputFile, output: outputFile}), function() {
 					build()
 				}, true)
-			} else if((/(^|\-)main\.tpl\.html?$/).test(inputFile) || globalBuildTpl && (/\.tpl\.html?$/).test(inputFile)) {
+			} else if((/(^|[-_.])main\.tpl\.html?$/).test(path.basename(inputFile)) || globalBuildTpl && (/\.tpl\.html?$/).test(inputFile)) {
 				fileName = path.basename(inputFile) + '.js'
 				outputFile = path.join(outputDir, fileName)
 				buildOne(utils.extendObject(utils.cloneObject(info), {input: inputFile, output: outputFile}), function() {
@@ -1002,8 +1023,24 @@ function copyOne(info, callback, _deep) {
 		if(!globalAllowSrcOutput && !isSrcDir(outputDir)) {
 			throw new Error('Output to src dir denied!')
 		}
-		if((/\.(js|css|html|htm)$/).test(input)) {
-			grunt.file.copy(input, output, {encoding: charset})
+		if((/\.(js|css|html|htm)$/).test(input.toLowerCase())) {
+			if(info.i18n && langResource) {
+				var langCode
+				for(var i = 0; i < langResource.LANG_LIST.length; i++) {
+					var m = input.match(new RegExp('\\/(' + langResource.LANG_LIST[i] + ')\\/'))
+					if(m) {
+						langCode = m[1];
+						break;
+					}
+				}
+				if(langCode) {
+					writeFileSync(output, lang.replaceProperties(fs.readFileSync(input, charset), langResource[langCode]), charset)
+				} else {
+					grunt.file.copy(input, output, {encoding: charset})
+				}
+			} else {
+				grunt.file.copy(input, output, {encoding: charset})
+			}
 		} else {
 			grunt.file.copy(input, output, {encoding: null})
 		}
